@@ -1,0 +1,214 @@
+#pragma once
+#include <cstdint>
+#include <string>
+#include <vector>
+#include <unordered_map>
+
+namespace rccore {
+
+class RemoteContext;
+class PaintBundle;
+
+/**
+ * Optional 3D extension surface. The Java reference makes this a separate interface and has the
+ * 3D operations do `instanceof Paint3DContext`; the C++ equivalent is this virtual downcast,
+ * which returns null on a 2D-only backend. Either way a 3D document degrades to drawing nothing
+ * rather than failing to load.
+ *
+ * Conventions: right-handed, +Y up, -Z forward; column-major 4x4; clip = projection x view x
+ * model; matrix ops post-multiply the modelview; CCW front-facing; radians.
+ */
+class Paint3D {
+public:
+    virtual ~Paint3D() = default;
+    virtual void defineMesh3D(int id, const std::vector<int32_t>& indices,
+                              const std::vector<float>& verts,
+                              const std::vector<float>& normals,
+                              const std::vector<float>& uv) = 0;
+    virtual void setCamera3D(int projection, const std::vector<float>& projParams,
+                             const std::vector<float>& viewParams) = 0;
+    virtual void matrix3Op(int sub, const std::vector<float>& args) = 0;
+    virtual void drawMesh3D(int meshId, int mode) = 0;
+    virtual void clearDepth3D() = 0;
+    virtual void setLights3D(const std::vector<int>& types,
+                             const std::vector<int32_t>& colors,
+                             const std::vector<float>& params) = 0;
+    virtual void setTexture3D(int bitmapId) = 0;
+    virtual void setMaterial3D(float specStrength, float shininess) = 0;
+    virtual void setDepthBias3D(float constant, float slope) = 0;
+};
+
+class PaintContext {
+public:
+    explicit PaintContext(RemoteContext& context) : mContext(context) {}
+    virtual ~PaintContext() = default;
+
+    RemoteContext& getContext() { return mContext; }
+
+    /** Null unless this backend renders 3D. See Paint3D. */
+    virtual Paint3D* asPaint3D() { return nullptr; }
+
+    // Drawing
+    virtual void drawRect(float left, float top, float right, float bottom) = 0;
+    virtual void drawCircle(float cx, float cy, float radius) = 0;
+    virtual void drawLine(float x1, float y1, float x2, float y2) = 0;
+    virtual void drawOval(float left, float top, float right, float bottom) = 0;
+    virtual void drawArc(float left, float top, float right, float bottom,
+                         float startAngle, float sweepAngle) = 0;
+    virtual void drawRoundRect(float left, float top, float right, float bottom,
+                               float rx, float ry) = 0;
+    virtual void drawSector(float left, float top, float right, float bottom,
+                            float startAngle, float sweepAngle) = 0;
+    virtual void drawPath(int pathId, float start, float end) = 0;
+
+    // ── 2D vertex meshes ────────────────────────────────────────────────────────────────
+    //
+    // Not pure: a backend that has not implemented meshes still compiles and simply draws
+    // nothing, which is how the 3D family is handled next door. Geometry arrives already in
+    // the layout drawVertices wants, so a backend should need no repacking.
+    //
+    // An empty `uv` or `colors` means the channel is absent.
+    //
+    // drawMesh MUST leave the paint exactly as it found it — shader, blend, style, colour —
+    // including when it throws. Nothing errors when it does not; the shapes are all correct
+    // and simply the wrong colour, which is the hardest kind of defect to attribute.
+    virtual void setMesh(int meshId, int layout, int uCount, int vCount,
+                         const std::vector<float>& verts, const std::vector<float>& uv,
+                         const std::vector<int32_t>& colors,
+                         const std::vector<int32_t>& indices) {
+        (void)meshId; (void)layout; (void)uCount; (void)vCount;
+        (void)verts; (void)uv; (void)colors; (void)indices;
+    }
+    virtual void drawMesh(int meshId, int blend, int imageId) {
+        (void)meshId; (void)blend; (void)imageId;
+    }
+    virtual void matrixFromMesh(int meshId, float u, float v, int flags) {
+        (void)meshId; (void)u; (void)v; (void)flags;
+    }
+    virtual void drawTweenPath(int path1Id, int path2Id, float tween,
+                               float start, float end) = 0;
+    virtual void tweenPath(int outId, int pathId1, int pathId2, float tween) = 0;
+    virtual void drawBitmap(int imageId, float left, float top,
+                            float right, float bottom) = 0;
+    virtual void drawBitmapInt(int imageId,
+                               int srcL, int srcT, int srcR, int srcB,
+                               int dstL, int dstT, int dstR, int dstB,
+                               int cdId) = 0;
+    virtual void drawTextRun(int textId, int start, int end,
+                             int contextStart, int contextEnd,
+                             float x, float y, bool rtl) = 0;
+    virtual void drawTextAnchored(int textId, float x, float y,
+                                  float panX, float panY, int flags) = 0;
+    virtual void drawTextOnPath(int textId, int pathId,
+                                float hOffset, float vOffset) = 0;
+
+    // Paint
+    virtual void applyPaint(const PaintBundle& bundle) = 0;
+    virtual void savePaint() = 0;
+    virtual void restorePaint() = 0;
+
+    // Transform
+    virtual void matrixSave() = 0;
+    virtual void matrixRestore() = 0;
+    virtual void matrixScale(float sx, float sy, float cx, float cy) = 0;
+    virtual void matrixTranslate(float dx, float dy) = 0;
+    virtual void matrixRotate(float degrees, float cx, float cy) = 0;
+    virtual void matrixSkew(float sx, float sy) = 0;
+
+    // The alpha of the current paint (a visibility function's paint alpha is the layer's
+    // DrawContent composites the component with). 1 for backends that do not track it.
+    virtual float currentPaintAlpha() const { return 1.0f; }
+
+    // Alpha compositing layer (for layout enter/exit fades). Default falls back to a
+    // plain matrix save/restore (no alpha) so non-Skia backends stay balanced.
+    virtual void saveLayerAlpha(float alpha, float left, float top, float right, float bottom) {
+        (void)alpha; (void)left; (void)top; (void)right; (void)bottom;
+        matrixSave();
+    }
+    // Blur render effect layer (graphicsLayer blur). Content drawn into the layer is
+    // gaussian-blurred on restore. Default falls back to a plain save so backends without
+    // image filters stay balanced (no blur).
+    virtual void saveLayerWithBlur(float sigmaX, float sigmaY,
+                                   float left, float top, float right, float bottom) {
+        (void)sigmaX; (void)sigmaY; (void)left; (void)top; (void)right; (void)bottom;
+        matrixSave();
+    }
+    virtual void restoreLayer() { matrixRestore(); }
+
+    // Set the current paint's typeface to a named system font family (e.g. "Futura",
+    // "Avenir Next", "SF Mono") at the given weight/italic, resolved via the platform font
+    // manager. No-op on backends without one (they keep the default typeface).
+    virtual void applyTypefaceByName(const std::string& family, int weight, bool italic) {
+        (void)family; (void)weight; (void)italic;
+    }
+
+    // Clipping
+    virtual void clipRect(float left, float top, float right, float bottom) = 0;
+    virtual void clipPath(int pathId, int regionOp) = 0;
+    virtual void roundedClipRect(float w, float h, float topStart, float topEnd,
+                                  float bottomStart, float bottomEnd) = 0;
+
+    // Data
+    virtual void loadText(int id, const std::string& text) = 0;
+    virtual std::string getText(int id) = 0;
+    virtual void loadBitmap(int imageId, int widthAndType,
+                            int heightAndEncoding,
+                            const std::vector<uint8_t>& data) = 0;
+    virtual void loadPathData(int instanceId, int winding,
+                              const std::vector<float>& path) = 0;
+    virtual void appendPathData(int instanceId,
+                                const std::vector<float>& path) = 0;
+
+    // Graphics layers
+    virtual void startGraphicsLayer(int w, int h) {}
+    virtual void endGraphicsLayer() {}
+
+    // Offscreen bitmap rendering (DrawToBitmap support)
+    virtual void beginDrawToBitmap(int bitmapId, int mode, int color) {}
+    virtual void endDrawToBitmap() {}
+
+    // Text measurement (for layout system)
+    // Returns approximate width and height for a text string at a given font size.
+    // Subclasses should override with actual font metrics.
+    virtual float measureTextWidth(const std::string& text, float fontSize) {
+        return fontSize * 0.6f * text.size();
+    }
+    virtual float measureTextHeight(const std::string& text, float fontSize) {
+        return fontSize * 1.2f;
+    }
+    virtual float measureTextAscent(const std::string& text, float fontSize) {
+        return fontSize;  // approximate: ascent ≈ fontSize
+    }
+
+    // Text bounds measurement (for TextMeasure/TextAttribute ops).
+    // bounds[0]=left, bounds[1]=top, bounds[2]=right, bounds[3]=bottom.
+    virtual void getTextBounds(int textId, int start, int end, int flags, float bounds[4]) {
+        std::string text = getText(textId);
+        if (text.empty()) { bounds[0]=bounds[1]=bounds[2]=bounds[3]=0; return; }
+        int s = start >= 0 ? start : 0;
+        int e = end >= 0 ? std::min(end, (int)text.size()) : (int)text.size();
+        std::string sub = text.substr(s, e - s);
+        float fontSize = 14.0f; // default
+        bounds[0] = 0;
+        bounds[1] = -measureTextAscent(sub, fontSize);
+        bounds[2] = measureTextWidth(sub, fontSize);
+        bounds[3] = measureTextHeight(sub, fontSize) + bounds[1];
+    }
+
+    // Path boolean operations
+    virtual void combinePath(int outId, int pathId1, int pathId2, int operation) {}
+
+    // Reset
+    virtual void reset() = 0;
+
+    // Repaint tracking
+    void needsRepaint() { mNeedsRepaint = true; }
+    bool doesNeedsRepaint() const { return mNeedsRepaint; }
+    void clearNeedsRepaint() { mNeedsRepaint = false; }
+
+protected:
+    RemoteContext& mContext;
+    bool mNeedsRepaint = false;
+};
+
+} // namespace rccore

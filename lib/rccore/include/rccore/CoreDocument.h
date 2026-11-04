@@ -1,0 +1,148 @@
+#pragma once
+#include "rccore/Operation.h"
+#include "rccore/RemoteContext.h"
+#include "rccore/animation/LayoutAnimation.h"
+#include "rccore/RemapContext.h"
+#include <vector>
+#include <memory>
+
+namespace rccore {
+
+class WireBuffer;
+
+class CoreDocument : public IdAllocator {
+public:
+    /** CoreDocument.getNextId: ids for what pattern inflation declares, above every id the
+     *  document itself declares (see initFromBuffer). */
+    int getNextId() override { return ++mCurrentId; }
+
+    // Restart the animation clock: the next paint is time 0. A document painted ahead of time
+    // (a slide prepared off-screen before it is shown) would otherwise count its animation from
+    // that first, unseen paint, and arrive with its opening animation already played.
+    void resetAnimationClock() { mAnimationStartMs = -1; mLastAnimationTime = 0.0f; }
+
+    static constexpr int DOCUMENT_API_LEVEL = 8;
+
+    CoreDocument() = default;
+
+    // Parse from binary
+    bool initFromBuffer(WireBuffer& buffer);
+
+    // Register variable listeners (call once after initFromBuffer)
+    void registerListeners(RemoteContext& context);
+
+    // This document's layout-animation state (previous painted bounds per component id).
+    // Per-document because component ids only mean something inside one document; see
+    // animation/LayoutAnimation.h.
+    LayoutAnimStore& animStore() { return mAnimStore; }
+
+    // Two-pass execution
+    // theme: -1=UNSPECIFIED (no filtering), -3=LIGHT, -2=DARK
+    void applyDataOperations(RemoteContext& context, int theme = -3);
+    void paint(RemoteContext& context, int theme = -3);
+
+    // Time variables: populate system time variables into context.
+    // If fixedTimeMs > 0, use that epoch-millis instead of real clock.
+    void updateTimeVariables(RemoteContext& context);
+
+    // Set a fixed time (epoch milliseconds) for deterministic rendering.
+    // 0 = use real system clock.
+    void setFixedTimeMs(int64_t ms) { mFixedTimeMs = ms; }
+
+    // Touch dispatch — routes events to registered TouchListener operations
+    void touchDown(RemoteContext& context, float x, float y);
+    void touchDrag(RemoteContext& context, float x, float y);
+    void touchUp(RemoteContext& context, float x, float y, float dx, float dy);
+
+    // Click dispatch and registration
+    void addClickArea(int id, const std::string& contentDescription, float left, float top, float right, float bottom, const std::string& metadata);
+    bool onClick(RemoteContext& context, float x, float y);
+    bool performClick(RemoteContext& context, int id, const std::string& metadata);
+
+    // Accessors
+    int getWidth() const { return mWidth; }
+    int getHeight() const { return mHeight; }
+    /** DOC_DENSITY_BEHAVIOR (header key 27): 0 legacy, 1 pixels, 2 dp. */
+    int getDensityBehavior() const { return mDensityBehavior; }
+    void setWidth(int w) { mWidth = w; }
+    void setHeight(int h) { mHeight = h; }
+    const std::vector<std::unique_ptr<Operation>>& getOperations() const { return mOperations; }
+
+    // Content behavior (set by RootContentBehavior operation)
+    void setRootContentBehavior(int scroll, int alignment, int sizing, int mode) {
+        mContentScroll = scroll;
+        mContentAlignment = alignment;
+        mContentSizing = sizing;
+        mContentMode = mode;
+    }
+
+    // Content sizing/scale constants (matching Java RootContentBehavior)
+    static constexpr int SIZING_SCALE = 2;
+    static constexpr int SCALE_INSIDE = 1;
+    static constexpr int SCALE_FILL_WIDTH = 2;
+    static constexpr int SCALE_FILL_HEIGHT = 3;
+    static constexpr int SCALE_FIT = 4;
+    static constexpr int SCALE_CROP = 5;
+    static constexpr int SCALE_FILL_BOUNDS = 6;
+    static constexpr int ALIGNMENT_TOP = 1;
+    static constexpr int ALIGNMENT_VERTICAL_CENTER = 2;
+    static constexpr int ALIGNMENT_BOTTOM = 4;
+    static constexpr int ALIGNMENT_START = 0x10;
+    static constexpr int ALIGNMENT_HORIZONTAL_CENTER = 0x20;
+    static constexpr int ALIGNMENT_END = 0x40;
+
+private:
+    void applyOperations(RemoteContext& context,
+                         std::vector<std::unique_ptr<Operation>>& ops,
+                         int theme = -3);
+    static void prunePatternDefinitions(
+            std::vector<std::unique_ptr<Operation>>& ops);
+    void registerListenersRecursive(RemoteContext& context,
+                                     std::vector<std::unique_ptr<Operation>>& ops);
+    void computeScale(float w, float h, float* scaleOutput);
+    void computeTranslate(float w, float h, float sx, float sy, float* translateOutput);
+
+    std::vector<std::unique_ptr<Operation>> mOperations;
+    // A compressed document (Header.COMPRESS) decompressed by initFromBuffer: its bytes live here.
+    std::vector<uint8_t> mDecompressed;
+    // Scroll modifiers with a constant position that took the current touch down: they
+    // scroll themselves under drag (ScrollModifierOperation.onTouchDrag).
+    std::vector<class ModifierScroll*> mScrollCaptures;
+    static constexpr float kTouchSlop = 8.0f;   // as the web player
+    float mTouchStartX = 0, mTouchStartY = 0;
+    bool mTouchMoved = false;
+    // Components that took the touch-down (the reference's mAppliedTouchOperations): their
+    // onTouchUp / onTouchCancel actions run when the touch ends.
+    std::vector<Operation*> mTouchTargets;
+    int mCurrentId = 0;
+    int mDensityBehavior = 0;
+    LayoutAnimStore mAnimStore;
+    int mWidth = 600;
+    int mHeight = 600;
+    int mMajorVersion = 0;
+    int mMinorVersion = 0;
+    int mPatchVersion = 0;
+    int64_t mCapabilities = 0;
+    // -1 means "not pinned". It cannot be 0: epoch 0 is a legitimate instant to
+    // pin to, and a >0 test silently left the wall clock running for it.
+    int64_t mFixedTimeMs = -1;
+    // Epoch-millis of the first frame, so animation time can be measured from playback start
+    // rather than from the epoch. -1 until the first updateTimeVariables.
+    int64_t mAnimationStartMs = -1;
+    float mLastAnimationTime = 0.0f;
+    int mContentScroll = 0;
+    int mContentAlignment = 0;
+    int mContentSizing = 0;
+    int mContentMode = 0;
+
+public:
+    struct ClickAreaSpec {
+        int id = 0;
+        std::string contentDescription;
+        float left = 0, top = 0, right = 0, bottom = 0;
+        std::string metadata;
+    };
+    std::vector<ClickAreaSpec> mClickAreas;
+};
+
+} // namespace rccore

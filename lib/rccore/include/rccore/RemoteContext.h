@@ -1,0 +1,526 @@
+#pragma once
+#include <algorithm>
+#include <cstdint>
+#include <functional>
+#include <limits>
+#include <string>
+#include <memory>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+namespace rccore {
+
+class PaintContext;
+class CoreDocument;
+class Operation;
+class ShaderData;
+class CustomComponentHost;
+
+enum class ContextMode { UNSET, DATA, PAINT };
+
+class RemoteContext {
+public:
+    RemoteContext() = default;
+    virtual ~RemoteContext() = default;
+
+    // Opaque per-document layout cache (owned here so its lifetime matches the document's,
+    // avoiding stale reuse). Populated/used by LayoutRoot::apply — see LayoutOperations.cpp.
+    std::shared_ptr<void> mLayoutCache;
+
+    // Bumped whenever a *non-clock* variable's value changes. LayoutRoot::apply uses it to
+    // skip the measure/layout pass while it's unchanged (a static or settled slide), and to
+    // re-lay-out the moment any layout-affecting value moves. Clock/date variables (which
+    // advance every frame but only drive painted clock/text, not layout) are excluded so a
+    // static slide can actually stay cached.
+    uint64_t mLayoutEpoch = 0;
+    static bool isClockVar(int id) {
+        switch (id) {
+            case ID_CONTINUOUS_SEC: case ID_TIME_IN_SEC: case ID_TIME_IN_MIN: case ID_TIME_IN_HR:
+            case ID_CALENDAR_MONTH: case ID_OFFSET_TO_UTC: case ID_WEEK_DAY: case ID_DAY_OF_MONTH:
+            case ID_ANIMATION_TIME: case ID_ANIMATION_DELTA_TIME: case ID_EPOCH_SECOND:
+            case ID_DAY_OF_YEAR: case ID_YEAR: case ID_API_LEVEL:
+                return true;
+            default: return false;
+        }
+    }
+
+    // ── System variable IDs ──────────────────────────────────────────
+    static constexpr int ID_CONTINUOUS_SEC      = 1;
+    static constexpr int ID_TIME_IN_SEC         = 2;
+    static constexpr int ID_TIME_IN_MIN         = 3;
+    static constexpr int ID_TIME_IN_HR          = 4;
+    static constexpr int ID_WINDOW_WIDTH        = 5;
+    static constexpr int ID_WINDOW_HEIGHT       = 6;
+    static constexpr int ID_COMPONENT_WIDTH     = 7;
+    static constexpr int ID_COMPONENT_HEIGHT    = 8;
+    static constexpr int ID_CALENDAR_MONTH      = 9;
+    static constexpr int ID_OFFSET_TO_UTC       = 10;
+    static constexpr int ID_WEEK_DAY            = 11;
+    static constexpr int ID_DAY_OF_MONTH        = 12;
+    static constexpr int ID_TOUCH_POS_X         = 13;
+    static constexpr int ID_TOUCH_POS_Y         = 14;
+    static constexpr int ID_TOUCH_VEL_X         = 15;
+    static constexpr int ID_TOUCH_VEL_Y         = 16;
+    static constexpr int ID_DENSITY             = 27;
+    static constexpr int ID_API_LEVEL           = 28;
+    static constexpr int ID_ANIMATION_TIME      = 30;
+    static constexpr int ID_ANIMATION_DELTA_TIME = 31;
+    static constexpr int ID_EPOCH_SECOND        = 32;
+    static constexpr int ID_FONT_SIZE           = 33;
+    static constexpr int ID_DAY_OF_YEAR         = 34;
+    static constexpr int ID_YEAR                = 35;
+    // Proposed, not yet in androidx (see m5Tab docs/RC_SYSTEM_VARIABLES.md): the last four
+    // ids below the first document id (42), for the most universal device state.
+    static constexpr int ID_BATTERY_LEVEL       = 38;   // 0..100 %, -1 = no battery / unknown
+    static constexpr int ID_POWER_STATE         = 39;   // 0 battery, 1 charging, 2 external power, -1 unknown
+    static constexpr int ID_MEMORY_FREE         = 40;   // free memory in MB
+    static constexpr int ID_NETWORK_SIGNAL      = 41;   // 0..100 %, 0 = offline
+
+    // Mode
+    ContextMode getMode() const { return mMode; }
+    void setMode(ContextMode mode) { mMode = mode; }
+
+    // Dimensions
+    float mWidth = 0;
+    float mHeight = 0;
+
+    // Display density (SDPI / 160). Default 1.0 (matching TS behavior when no DOC_DENSITY_AT_GENERATION).
+    float mDensity = 1.0f;
+    // The document's DOC_DENSITY_BEHAVIOR header (CoreDocument.mDensityBehavior): 0 legacy,
+    // 1 pixels, 2 dp (layout dimensions, padding, spacing, borders, clips, offsets and
+    // constant font sizes are multiplied by mDensity). Copied in by CoreDocument.
+    int mDensityBehavior = 0;
+
+    // Paint context
+    void setPaintContext(PaintContext* pc) { mPaintContext = pc; }
+    PaintContext* getPaintContext() { return mPaintContext; }
+
+    // Host for native custom components (LAYOUT_CUSTOM, op 93). Optional; when null a
+    // custom component draws nothing.
+    void setCustomHost(CustomComponentHost* h) { mCustomHost = h; }
+    CustomComponentHost* getCustomHost() { return mCustomHost; }
+
+    // Host actions (RemoteContext.runAction / runNamedAction in the reference). HOST_ACTION
+    // (209) and HostActionMetadata (216) call `hostAction` with an id and a metadata string;
+    // HostNamedAction (210) calls `hostNamedAction` with the name, the value's type
+    // (-1 none, 0 float, 1 int, 2 string, 3 float array) and the value as text.
+    std::function<void(int id, const std::string& metadata)> hostAction;
+    std::function<void(const std::string& name, int type, const std::string& value)> hostNamedAction;
+    void runAction(int id, const std::string& metadata) { if (hostAction) hostAction(id, metadata); }
+    void runNamedAction(const std::string& name, int type, const std::string& value) {
+        if (hostNamedAction) hostNamedAction(name, type, value);
+    }
+
+    // Animation time (seconds since animation start)
+    float getAnimationTime() const { return getFloat(ID_ANIMATION_TIME); }
+
+    // Signal that a repaint is needed (delegates to PaintContext)
+    void needsRepaint();
+
+    // Document
+    void setDocument(CoreDocument* doc) { mDocument = doc; }
+    CoreDocument* getDocument() { return mDocument; }
+
+    // Theme (block filtering — set by ThemeOp to gate operations)
+    int getTheme() const { return mTheme; }
+    void setTheme(int theme) { mTheme = theme; }
+
+    // Paint theme (color scheme — LIGHT=-3 or DARK=-2, used by ColorTheme)
+    int getPaintTheme() const { return mPaintTheme; }
+    void setPaintTheme(int theme) { mPaintTheme = theme; }
+
+    // Debug
+    int mDebug = 0;
+    bool isVisualDebug() const { return mDebug == 2; }
+
+    // ── Variable stores (with listener notification) ─────────────────
+
+    /**
+     * Set a float from the document. Ignored once the id has been overridden — see
+     * overrideFloat. Mirrors RemoteComposeState.updateFloat, which is gated on
+     * !mFloatOverride[id] in the reference.
+     */
+    void loadFloat(int id, float value) {
+        if (mFloatOverrides.count(id)) return;
+        auto it = mFloats.find(id);
+        if ((it == mFloats.end() || it->second != value) && !isClockVar(id) && !isPaintOnlyVar(id)) mLayoutEpoch++;
+        mFloats[id] = value;
+        mIntegers[id] = static_cast<int>(value);
+        notifyListeners(id);
+    }
+    /**
+     * Set a float from outside the document — a host, or a click action — and make it stick:
+     * later loadFloat calls for this id are ignored. This is how the reference lets an
+     * interaction win over whatever the document keeps writing every frame.
+     */
+    void overrideFloat(int id, float value) {
+        auto it = mFloats.find(id);
+        if ((it == mFloats.end() || it->second != value) && !isClockVar(id) && !isPaintOnlyVar(id)) mLayoutEpoch++;
+        mFloats[id] = value;
+        mIntegers[id] = static_cast<int>(value);
+        mFloatOverrides.insert(id);
+        notifyListeners(id);
+    }
+    float getFloat(int id) const {
+        auto it = mFloats.find(id);
+        return it != mFloats.end() ? it->second : 0.0f;
+    }
+
+    void loadInteger(int id, int value) {
+        if (mIntegerOverrides.count(id)) return;
+        auto it = mIntegers.find(id);
+        if ((it == mIntegers.end() || it->second != value) && !isClockVar(id) && !isPaintOnlyVar(id)) mLayoutEpoch++;
+        mIntegers[id] = value;
+        mFloats[id] = static_cast<float>(value);
+        notifyListeners(id);
+    }
+    /** As overrideFloat, for integers. */
+    void overrideInteger(int id, int value) {
+        auto it = mIntegers.find(id);
+        if ((it == mIntegers.end() || it->second != value) && !isClockVar(id) && !isPaintOnlyVar(id)) mLayoutEpoch++;
+        mIntegers[id] = value;
+        mFloats[id] = static_cast<float>(value);
+        mIntegerOverrides.insert(id);
+        // Both slots are written, so both stick: an integer the document declared as a float
+        // constant (json2rc does that) is otherwise put back by its own loadFloat next frame.
+        mFloatOverrides.insert(id);
+        notifyListeners(id);
+    }
+    int getInteger(int id) const {
+        auto it = mIntegers.find(id);
+        return it != mIntegers.end() ? it->second : 0;
+    }
+
+    void loadLong(int id, int64_t value) {
+        mLongs[id] = value;
+        notifyListeners(id);
+    }
+    int64_t getLong(int id) const {
+        auto it = mLongs.find(id);
+        return it != mLongs.end() ? it->second : 0;
+    }
+
+    void loadBoolean(int id, bool value) {
+        mBooleans[id] = value;
+        notifyListeners(id);
+    }
+    bool getBoolean(int id) const {
+        auto it = mBooleans.find(id);
+        return it != mBooleans.end() ? it->second : false;
+    }
+
+    void loadColor(int id, int color) {
+        if (mColorOverrides.count(id)) return;  // Don't overwrite themed colors
+        mColors[id] = color;
+        notifyListeners(id);
+    }
+    void overrideColor(int id, int color) {
+        mColors[id] = color;
+        mColorOverrides.insert(id);
+        notifyListeners(id);
+    }
+    int getColor(int id) const {
+        auto it = mColors.find(id);
+        return it != mColors.end() ? it->second : 0;
+    }
+
+    // Register a named color variable and apply default system color if known
+    void registerNamedColor(int id, const std::string& colorName);
+
+    // Look up a default Material Design system color by name.
+    // Returns true and sets outColor if found, false otherwise.
+    static bool getDefaultSystemColor(const std::string& name, int& outColor);
+
+    // Float list store (for expressions with array ops). Keyed as RemoteComposeState's
+    // collection map is (id & 0xFFFFF), so an array referenced with its region bits (an
+    // expression's NaN 0x2000xx) and one declared with a plain id are the same list.
+    static int listKey(int id) { return id & 0xFFFFF; }
+    void loadFloatList(int id, const std::vector<float>& data) {
+        id = listKey(id);
+        if (mFloatListOverrides.count(id)) return;   // a host value sticks
+        mFloatLists[id] = data;
+    }
+    /** Set a float list from the host and make it stick. Java applies a DataListFloat once,
+     *  at load, so a host write afterwards survives; this player re-runs data ops every
+     *  data pass, so the host value is guarded like overrideFloat. */
+    void overrideFloatList(int id, const std::vector<float>& data) {
+        id = listKey(id);
+        mFloatLists[id] = data;
+        mFloatListOverrides.insert(id);
+    }
+    /** A DataDynamicListFloat: created once (its values persist across data passes, as the
+     *  Java op owns its array), the only kind UpdateDynamicFloatList writes into
+     *  (RemoteComposeState.getDynamicFloats is null for a plain DataListFloat). */
+    void loadDynamicFloatList(int id, int length) {
+        id = listKey(id);
+        auto it = mFloatLists.find(id);
+        if (!mDynamicFloatLists.count(id) || it == mFloatLists.end()
+            || (int)it->second.size() != length)
+            mFloatLists[id] = std::vector<float>(std::max(0, length), 0.0f);
+        mDynamicFloatLists.insert(id);
+    }
+    std::vector<float>* getDynamicFloatList(int id) {
+        if (!mDynamicFloatLists.count(listKey(id))) return nullptr;
+        return getFloatListMutable(id);
+    }
+    /** RemoteComposeState.markVariableDirty: the ops listening to the list recompute. */
+    void markVariableDirty(int id) { notifyListeners(id); }
+    const std::vector<float>* getFloatList(int id) const {
+        auto it = mFloatLists.find(listKey(id));
+        return it != mFloatLists.end() ? &it->second : nullptr;
+    }
+    std::vector<float>* getFloatListMutable(int id) {
+        auto it = mFloatLists.find(listKey(id));
+        return it != mFloatLists.end() ? &it->second : nullptr;
+    }
+
+    // Generic object store (for cross-operation references like ParticlesCreate → ParticlesLoop)
+    void putObject(int id, Operation* op) { mObjects[id] = op; }
+    Operation* getObject(int id) const {
+        auto it = mObjects.find(id);
+        return it != mObjects.end() ? it->second : nullptr;
+    }
+
+    // Object matrix store (for MatrixConstant/MatrixExpression → MatrixVectorMath)
+    void putObjectMatrix(int id, const std::vector<float>& values) { mObjectMatrices[id] = values; }
+    const std::vector<float>* getObjectMatrix(int id) const {
+        auto it = mObjectMatrices.find(id);
+        return it != mObjectMatrices.end() ? &it->second : nullptr;
+    }
+
+    // Text store (delegated to paint context for actual storage)
+    void loadText(int id, const std::string& text);
+    /** Set a text from the host and make it stick (RemoteComposeState.overrideData). */
+    void overrideText(int id, const std::string& text);
+    std::string getText(int id) const;
+
+    // Bitmap store (delegated to paint context)
+    void loadBitmap(int imageId, int widthAndType, int heightAndEncoding,
+                    const std::vector<uint8_t>& data);
+
+    // Bitmap dimension lookup (populated during loadBitmap)
+    struct BitmapDim { int width = 0, height = 0; };
+    const BitmapDim* getBitmapDim(int imageId) const {
+        auto it = mBitmapDims.find(imageId);
+        return it != mBitmapDims.end() ? &it->second : nullptr;
+    }
+
+    // Path store (delegated to paint context)
+    /** Register a click area with the document; the ClickArea operation calls this each frame. */
+    void addClickArea(int id, int contentDescriptionId, float left, float top,
+                      float right, float bottom, int metadataId);
+
+    void loadPathData(int instanceId, int winding, const std::vector<float>& path);
+    void appendPathData(int instanceId, const std::vector<float>& path);
+
+    /** The raw verb stream of a stored path, or null if no such path was loaded.
+     *
+     * Paths were previously handed straight to the PaintContext and not retained, because
+     * nothing needed to read one back. LAYOUT_PATH_STRIP does: it flattens the path to a
+     * polyline and rides along it, so the geometry has to be available to the core rather
+     * than only to the backend. Mirrors RemoteContext.getPathData upstream.
+     */
+    const std::vector<float>* getPathData(int instanceId) const {
+        auto it = mPathData.find(instanceId);
+        return it != mPathData.end() ? &it->second : nullptr;
+    }
+
+    // Shader store
+    void loadShader(int id, ShaderData* shader) { mShaders[id] = shader; }
+    ShaderData* getShader(int id) const {
+        auto it = mShaders.find(id);
+        return it != mShaders.end() ? it->second : nullptr;
+    }
+
+    // Document load time (epoch milliseconds, used by TimeAttribute)
+    int64_t getDocLoadTime() const { return mDocLoadTime; }
+    void setDocLoadTime(int64_t millis) { mDocLoadTime = millis; }
+
+    // Header
+    void header(int majorVersion, int minorVersion, int patchVersion,
+                int width, int height, int64_t capabilities);
+
+    // Component dimension storage (for COMPONENT_VALUE resolution after layout)
+    // padX/padY: where the component's children are placed from, relative to (x, y) — its
+    // padding (and offset). Children's (x, y) are relative to that, not to the component's
+    // own corner. visible: false for GONE / INVISIBLE, which take no clicks.
+    struct ComponentDim {
+        float w = 0, h = 0, x = 0, y = 0, padX = 0, padY = 0; bool visible = true;
+        // A canvas content's position in the document (getLocationInWindow), recorded by
+        // the paint pass: ancestors' positions, paddings and scrolls included.
+        float rootX = 0, rootY = 0; bool hasRoot = false;
+    };
+    void setComponentRoot(int componentId, float x, float y) {
+        auto& d = mComponentDims[componentId];
+        d.rootX = x; d.rootY = y; d.hasRoot = true;
+    }
+    void setComponentDimension(int componentId, float w, float h, float x = 0, float y = 0) {
+        auto& d = mComponentDims[componentId];
+        d.w = w; d.h = h; d.x = x; d.y = y;
+    }
+    void setComponentContent(int componentId, float padX, float padY, bool visible) {
+        auto& d = mComponentDims[componentId];
+        d.padX = padX; d.padY = padY; d.visible = visible;
+    }
+    const ComponentDim* getComponentDimension(int componentId) const {
+        auto it = mComponentDims.find(componentId);
+        return it != mComponentDims.end() ? &it->second : nullptr;
+    }
+    void clearComponentDimensions() { mComponentDims.clear(); }
+    // Enumerate every measured component. Used by rc2layout to dump the computed
+    // layout for cross-engine comparison: a layout disagreement is a disagreement
+    // about a number on a component, and only the full map localises it.
+    const std::unordered_map<int, ComponentDim>& getComponentDimensions() const {
+        return mComponentDims;
+    }
+
+    // ── Variable listener system ─────────────────────────────────────
+
+    // Register that 'op' depends on variable 'variableId'.
+    // When that variable changes, op will be marked dirty.
+    void listensTo(int variableId, Operation* op);
+    // FloatExpression ops by the id they write, so an action can evaluate one on the spot
+    // (CoreDocument.evaluateFloatExpression in the reference reads the inputs as they are now).
+    void registerFloatExpression(int id, Operation* op) { mFloatExpressionOps[id] = op; }
+    Operation* floatExpressionOp(int id) const { auto it = mFloatExpressionOps.find(id); return it == mFloatExpressionOps.end() ? nullptr : it->second; }
+
+    // Check whether any operation listens to a given variable ID.
+    bool hasListeners(int variableId) const {
+        auto it = mVarListeners.find(variableId);
+        return it != mVarListeners.end() && !it->second.empty();
+    }
+
+    // Clear all listener registrations (for re-init).
+    void clearListeners() { mVarListeners.clear(); mTouchListeners.clear(); mPaintOnlyVars.clear(); mClassified = false; }
+
+    // Variables that only paint-time operations read — draw/matrix/clip/paint/path operations,
+    // an offset or a graphicsLayer modifier, or an expression whose own result is one of
+    // these. A change to one cannot move or resize anything, so it does not invalidate the
+    // layout cache (mLayoutEpoch): a push transition, a fade or a canvas animation over a static
+    // layout then re-paints without re-measuring every text on the slide. Computed once the
+    // listeners are registered (CoreDocument::registerListeners); anything read by an operation
+    // not known to be paint-only stays a layout input.
+    void classifyPaintOnlyVars();
+    bool isPaintOnlyVar(int id) const {
+        if (!mClassified) return false;
+        // Only what is proven paint-only. A variable with no listeners is NOT safe to skip:
+        // layout reads some ids without listening to them — a visibility modifier's integer,
+        // set by a click — and skipping the epoch left those buttons stuck in their old state.
+        return mPaintOnlyVars.count(id) != 0;
+    }
+
+    // ── Touch listener system ────────────────────────────────────────
+    void addTouchListener(Operation* op) { mTouchListeners.push_back(op); }
+    const std::vector<Operation*>& getTouchListeners() const { return mTouchListeners; }
+
+    // ── Repaint scheduling ───────────────────────────────────────────
+
+    // Returns milliseconds until next repaint is needed, or -1 for no repaint.
+    // 1 = repaint every frame (continuous animation).
+    //
+    // Not const: the reference latches mLastRepaint inside this call, and that latch is
+    // what makes wakeIn's narrowing rule work across frames.
+    //
+    // currentTimeMillis is passed in rather than read from the system clock, as the
+    // reference does, so a deterministic clock can drive it in tests.
+    int getRepaintDelay(int64_t currentTimeMillis);
+
+    // Ask for a repaint in `seconds`. Mirrors RemoteComposeState.wakeIn, including its
+    // narrowing rule: once a delay has been consumed, a later request only takes effect
+    // if it is sooner. A NaN clears the schedule.
+    void wakeIn(float seconds);
+
+    // Op count (safety)
+    void incrementOpCount() { mOpCount++; }
+    int getLastOpCount() { int c = mOpCount; mOpCount = 0; return c; }
+
+private:
+    void notifyListeners(int variableId);
+
+    ContextMode mMode = ContextMode::UNSET;
+    PaintContext* mPaintContext = nullptr;
+    CustomComponentHost* mCustomHost = nullptr;
+    CoreDocument* mDocument = nullptr;
+    int mTheme = 0;
+    int mPaintTheme = -3;  // Default LIGHT (matches Java/TS)
+    int mOpCount = 0;
+    // NaN means "nothing scheduled". mLastRepaint latches once a delay has been read.
+    float mRepaintSeconds = std::numeric_limits<float>::quiet_NaN();
+    float mLastRepaint = std::numeric_limits<float>::quiet_NaN();
+    int64_t mDocLoadTime = 0;
+
+    std::unordered_map<int, float> mFloats;
+    std::unordered_map<int, int> mIntegers;
+    std::unordered_map<int, int64_t> mLongs;
+    std::unordered_map<int, bool> mBooleans;
+    std::unordered_map<int, int> mColors;
+    std::unordered_set<int> mColorOverrides;  // IDs overridden by system theme defaults
+    std::unordered_set<int> mFloatOverrides;
+    std::unordered_set<int> mFloatListOverrides;
+    std::unordered_set<int> mDynamicFloatLists;
+    std::unordered_set<int> mTextOverrides;
+    std::unordered_set<int> mIntegerOverrides;
+    std::unordered_map<int, std::string> mTexts;
+    std::unordered_map<int, std::vector<float>> mFloatLists;
+    std::unordered_map<int, std::vector<float>> mObjectMatrices;
+    std::unordered_map<int, Operation*> mObjects;
+    std::unordered_map<int, ComponentDim> mComponentDims;
+    std::unordered_map<int, ShaderData*> mShaders;
+    // Retained so LAYOUT_PATH_STRIP can flatten a path it did not create. See getPathData.
+    std::unordered_map<int, std::vector<float>> mPathData;
+    std::unordered_map<int, BitmapDim> mBitmapDims;
+
+    // Variable → list of operations listening to it
+    std::unordered_map<int, std::vector<Operation*>> mVarListeners;
+    std::unordered_set<int> mPaintOnlyVars;
+    std::unordered_map<int, Operation*> mFloatExpressionOps;
+    bool mClassified = false;                 // classifyPaintOnlyVars has run for these listeners
+
+    // Operations registered as touch listeners (e.g. TouchExpressionOp)
+    std::vector<Operation*> mTouchListeners;
+
+public:
+    // Current canvas/component bounds stack — pushed when entering a canvas,
+    // popped when leaving. Touch expressions capture their bounds from here
+    // during apply() to enable per-component hit-testing.
+    // Canvas bounds for per-component touch hit-testing.
+    // Tracks cumulative translation so touch (in window coords) maps to components.
+    struct CanvasBounds { float x = 0, y = 0, w = 0, h = 0; };
+    void pushCanvasBounds(float w, float h) {
+        float x = mTranslateX;
+        float y = mTranslateY;
+        mCanvasBoundsStack.push_back({x, y, w, h});
+    }
+    void pushCanvasBounds(float x, float y, float w, float h) {
+        mCanvasBoundsStack.push_back({x, y, w, h});
+    }
+    void popCanvasBounds() {
+        if (!mCanvasBoundsStack.empty()) mCanvasBoundsStack.pop_back();
+    }
+    const CanvasBounds& currentCanvasBounds() const {
+        static const CanvasBounds defaultBounds{0, 0, 99999, 99999};
+        return mCanvasBoundsStack.empty() ? defaultBounds : mCanvasBoundsStack.back();
+    }
+
+    // Cumulative translation tracking (updated by layout when offset/translate applied)
+    float mTranslateX = 0, mTranslateY = 0;
+    void pushTranslate(float dx, float dy) {
+        mTranslateStack.push_back({mTranslateX, mTranslateY});
+        mTranslateX += dx;
+        mTranslateY += dy;
+    }
+    void popTranslate() {
+        if (!mTranslateStack.empty()) {
+            auto& prev = mTranslateStack.back();
+            mTranslateX = prev.first;
+            mTranslateY = prev.second;
+            mTranslateStack.pop_back();
+        }
+    }
+private:
+    std::vector<CanvasBounds> mCanvasBoundsStack;
+    std::vector<std::pair<float,float>> mTranslateStack;
+};
+
+} // namespace rccore

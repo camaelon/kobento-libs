@@ -1,0 +1,449 @@
+#include "rccore/RemoteContext.h"
+#include "rccore/operations/AdvancedOperations.h"
+#include "rccore/PaintContext.h"
+#include "rccore/Operation.h"
+#include "rccore/CoreDocument.h"
+
+#include <algorithm>
+#include <chrono>
+
+namespace rccore {
+
+void RemoteContext::loadText(int id, const std::string& text) {
+    if (mTextOverrides.count(id)) return;   // RemoteComposeState.updateData: !mDataOverride[id]
+    mTexts[id] = text;
+    notifyListeners(id);
+    if (mPaintContext) {
+        mPaintContext->loadText(id, text);
+    }
+}
+
+void RemoteContext::overrideText(int id, const std::string& text) {
+    mTextOverrides.erase(id);
+    loadText(id, text);
+    mTextOverrides.insert(id);
+}
+
+std::string RemoteContext::getText(int id) const {
+    auto it = mTexts.find(id);
+    return it != mTexts.end() ? it->second : "";
+}
+
+void RemoteContext::loadBitmap(int imageId, int widthAndType,
+                               int heightAndEncoding,
+                               const std::vector<uint8_t>& data) {
+    // Store bitmap dimensions for ImageAttribute lookups
+    int w = (widthAndType > 0xFFFF) ? (widthAndType & 0xFFFF) : widthAndType;
+    int h = (heightAndEncoding > 0xFFFF) ? (heightAndEncoding & 0xFFFF) : heightAndEncoding;
+    mBitmapDims[imageId] = {w, h};
+
+    if (mPaintContext) {
+        mPaintContext->loadBitmap(imageId, widthAndType, heightAndEncoding, data);
+    }
+}
+
+void RemoteContext::loadPathData(int instanceId, int winding,
+                                  const std::vector<float>& path) {
+    // Kept as well as forwarded: LAYOUT_PATH_STRIP reads the verb stream back to flatten it.
+    mPathData[instanceId] = path;
+    if (mPaintContext) {
+        mPaintContext->loadPathData(instanceId, winding, path);
+    }
+}
+
+void RemoteContext::appendPathData(int instanceId,
+                                    const std::vector<float>& path) {
+    // Mirror the append into the retained copy so a path built incrementally is as readable
+    // to LAYOUT_PATH_STRIP as one loaded whole.
+    auto& stored = mPathData[instanceId];
+    stored.insert(stored.end(), path.begin(), path.end());
+    if (mPaintContext) {
+        mPaintContext->appendPathData(instanceId, path);
+    }
+}
+
+void RemoteContext::addClickArea(int id, int contentDescriptionId,
+                                 float left, float top, float right, float bottom,
+                                 int metadataId) {
+    if (mDocument) {
+        mDocument->addClickArea(id, getText(contentDescriptionId), left, top, right, bottom,
+                                getText(metadataId));
+    }
+}
+
+void RemoteContext::header(int majorVersion, int minorVersion,
+                            int patchVersion, int width, int height,
+                            int64_t capabilities) {
+    // Store document dimensions but do NOT overwrite viewport dimensions.
+    // In Java, the player sets mWidth/mHeight from the actual view size;
+    // the header only records the document's intrinsic size.
+    // The host (rc2image) sets mWidth/mHeight before calling paint().
+
+    // Record document load time if not already set
+    if (mDocLoadTime == 0) {
+        auto now = std::chrono::system_clock::now();
+        mDocLoadTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now.time_since_epoch()).count();
+    }
+}
+
+void RemoteContext::needsRepaint() {
+    if (mPaintContext) {
+        mPaintContext->needsRepaint();
+    }
+}
+
+// ── Default Material Design system colors (blue-toned baseline) ──────
+
+// Helper to convert 0xAARRGGBB uint32 to signed int (Java color format)
+static constexpr int C(uint32_t c) { return static_cast<int>(c); }
+
+// Static table of default system colors.
+// Based on Material Design 3 baseline with blue seed color, matching the
+// typical Android 12+ default palette when no dynamic colors are available.
+static const std::unordered_map<std::string, int>& getDefaultColorTable() {
+    static const std::unordered_map<std::string, int> table = {
+        // ── system_accent1 (Primary Blue tonal palette) ──
+        {"system_accent1_0",    C(0xFFFFFFFF)},
+        {"system_accent1_10",   C(0xFFFEFBFF)},
+        {"system_accent1_50",   C(0xFFEEF0FF)},
+        {"system_accent1_100",  C(0xFFD9E2FF)},
+        {"system_accent1_200",  C(0xFFB0C6FF)},
+        {"system_accent1_300",  C(0xFF94AAE4)},
+        {"system_accent1_400",  C(0xFF7A90C8)},
+        {"system_accent1_500",  C(0xFF6076AC)},
+        {"system_accent1_600",  C(0xFF475D92)},
+        {"system_accent1_700",  C(0xFF2F4578)},
+        {"system_accent1_800",  C(0xFF152E60)},
+        {"system_accent1_900",  C(0xFF001945)},
+        {"system_accent1_1000", C(0xFF000000)},
+
+        // ── system_accent2 (Secondary muted blue tonal palette) ──
+        {"system_accent2_0",    C(0xFFFFFFFF)},
+        {"system_accent2_10",   C(0xFFFEFBFF)},
+        {"system_accent2_50",   C(0xFFEEF0FF)},
+        {"system_accent2_100",  C(0xFFDCE2F9)},
+        {"system_accent2_200",  C(0xFFC0C6DC)},
+        {"system_accent2_300",  C(0xFFA4ABC1)},
+        {"system_accent2_400",  C(0xFF8A90A5)},
+        {"system_accent2_500",  C(0xFF70778B)},
+        {"system_accent2_600",  C(0xFF575E71)},
+        {"system_accent2_700",  C(0xFF404659)},
+        {"system_accent2_800",  C(0xFF2A3042)},
+        {"system_accent2_900",  C(0xFF151B2C)},
+        {"system_accent2_1000", C(0xFF000000)},
+
+        // ── system_accent3 (Tertiary mauve/lavender tonal palette) ──
+        {"system_accent3_0",    C(0xFFFFFFFF)},
+        {"system_accent3_10",   C(0xFFFFFBFF)},
+        {"system_accent3_50",   C(0xFFFFEBFA)},
+        {"system_accent3_100",  C(0xFFFDD7FA)},
+        {"system_accent3_200",  C(0xFFE0BBDD)},
+        {"system_accent3_300",  C(0xFFC3A0C1)},
+        {"system_accent3_400",  C(0xFFA886A6)},
+        {"system_accent3_500",  C(0xFF8C6D8C)},
+        {"system_accent3_600",  C(0xFF725572)},
+        {"system_accent3_700",  C(0xFF593D59)},
+        {"system_accent3_800",  C(0xFF412742)},
+        {"system_accent3_900",  C(0xFF2A122C)},
+        {"system_accent3_1000", C(0xFF000000)},
+
+        // ── system_neutral1 (Neutral tonal palette) ──
+        {"system_neutral1_0",    C(0xFFFFFFFF)},
+        {"system_neutral1_10",   C(0xFFFEFBFF)},
+        {"system_neutral1_50",   C(0xFFF1F0F7)},
+        {"system_neutral1_100",  C(0xFFE2E2E9)},
+        {"system_neutral1_200",  C(0xFFC6C6CD)},
+        {"system_neutral1_300",  C(0xFFABABB1)},
+        {"system_neutral1_400",  C(0xFF909097)},
+        {"system_neutral1_500",  C(0xFF76777D)},
+        {"system_neutral1_600",  C(0xFF5D5E64)},
+        {"system_neutral1_700",  C(0xFF45464C)},
+        {"system_neutral1_800",  C(0xFF2F3036)},
+        {"system_neutral1_900",  C(0xFF1A1B20)},
+        {"system_neutral1_1000", C(0xFF000000)},
+
+        // ── system_neutral2 (Neutral variant tonal palette) ──
+        {"system_neutral2_0",    C(0xFFFFFFFF)},
+        {"system_neutral2_10",   C(0xFFFEFBFF)},
+        {"system_neutral2_50",   C(0xFFF0F0FA)},
+        {"system_neutral2_100",  C(0xFFE1E2EC)},
+        {"system_neutral2_200",  C(0xFFC5C6D0)},
+        {"system_neutral2_300",  C(0xFFA9ABB4)},
+        {"system_neutral2_400",  C(0xFF8F9099)},
+        {"system_neutral2_500",  C(0xFF757780)},
+        {"system_neutral2_600",  C(0xFF5C5E67)},
+        {"system_neutral2_700",  C(0xFF44464F)},
+        {"system_neutral2_800",  C(0xFF2E3038)},
+        {"system_neutral2_900",  C(0xFF191B23)},
+        {"system_neutral2_1000", C(0xFF000000)},
+
+        // ── system_error (Error red tonal palette) ──
+        {"system_error_0",    C(0xFFFFFFFF)},
+        {"system_error_10",   C(0xFFFFFBFF)},
+        {"system_error_50",   C(0xFFFFEDEA)},
+        {"system_error_100",  C(0xFFFFDAD6)},
+        {"system_error_200",  C(0xFFFFB4AB)},
+        {"system_error_300",  C(0xFFFF897D)},
+        {"system_error_400",  C(0xFFFF5449)},
+        {"system_error_500",  C(0xFFDE3730)},
+        {"system_error_600",  C(0xFFBA1A1A)},
+        {"system_error_700",  C(0xFF93000A)},
+        {"system_error_800",  C(0xFF690005)},
+        {"system_error_900",  C(0xFF410002)},
+        {"system_error_1000", C(0xFF000000)},
+
+        // ── Semantic colors ──
+        {"system_on_surface_light",          C(0xFF1A1B20)},
+        {"system_on_surface_dark",           C(0xFFE2E2E9)},
+        {"system_on_surface_variant_light",  C(0xFF44464F)},
+        {"system_on_surface_variant_dark",   C(0xFFC5C6D0)},
+        {"system_on_surface_disabled",       C(0x611A1C1E)},
+        {"system_surface_light",             C(0xFFFAF8FF)},
+        {"system_surface_dark",              C(0xFF121318)},
+        {"system_surface_disabled",          C(0x1F1A1C1E)},
+        {"system_surface_variant_light",     C(0xFFE1E2EC)},
+        {"system_surface_variant_dark",      C(0xFF44464F)},
+        {"system_surface_bright_light",      C(0xFFFAF8FF)},
+        {"system_surface_bright_dark",       C(0xFF38393F)},
+        {"system_surface_dim_light",         C(0xFFDAD9E0)},
+        {"system_surface_dim_dark",          C(0xFF121318)},
+        {"system_surface_container_lowest_light",  C(0xFFFFFFFF)},
+        {"system_surface_container_lowest_dark",   C(0xFF0C0E13)},
+        {"system_surface_container_low_light",     C(0xFFF4F3FA)},
+        {"system_surface_container_low_dark",      C(0xFF1A1B20)},
+        {"system_surface_container_light",         C(0xFFEEEDF4)},
+        {"system_surface_container_dark",          C(0xFF1E1F25)},
+        {"system_surface_container_high_light",    C(0xFFE8E7EF)},
+        {"system_surface_container_high_dark",     C(0xFF282A2F)},
+        {"system_surface_container_highest_light", C(0xFFE2E2E9)},
+        {"system_surface_container_highest_dark",  C(0xFF33343A)},
+        {"system_background_light",          C(0xFFFAF8FF)},
+        {"system_background_dark",           C(0xFF121318)},
+        {"system_on_background_light",       C(0xFF1A1B20)},
+        {"system_on_background_dark",        C(0xFFE2E2E9)},
+        {"system_primary_light",             C(0xFF475D92)},
+        {"system_primary_dark",              C(0xFFB0C6FF)},
+        {"system_primary_container_light",   C(0xFFD9E2FF)},
+        {"system_primary_container_dark",    C(0xFF2F4578)},
+        {"system_on_primary_light",          C(0xFFFFFFFF)},
+        {"system_on_primary_dark",           C(0xFF152E60)},
+        {"system_on_primary_container_light", C(0xFF2F4578)},
+        {"system_on_primary_container_dark",  C(0xFFD9E2FF)},
+        {"system_on_primary_fixed",          C(0xFF001945)},
+        {"system_on_primary_fixed_variant",  C(0xFF2F4578)},
+        {"system_primary_fixed",             C(0xFFD9E2FF)},
+        {"system_primary_fixed_dim",         C(0xFFB0C6FF)},
+        {"system_secondary_light",           C(0xFF575E71)},
+        {"system_secondary_dark",            C(0xFFC0C6DC)},
+        {"system_secondary_container_light", C(0xFFDCE2F9)},
+        {"system_secondary_container_dark",  C(0xFF404659)},
+        {"system_on_secondary_light",        C(0xFFFFFFFF)},
+        {"system_on_secondary_dark",         C(0xFF2A3042)},
+        {"system_on_secondary_container_light", C(0xFF404659)},
+        {"system_on_secondary_container_dark",  C(0xFFDCE2F9)},
+        {"system_on_secondary_fixed",        C(0xFF151B2C)},
+        {"system_on_secondary_fixed_variant", C(0xFF404659)},
+        {"system_secondary_fixed",           C(0xFFDCE2F9)},
+        {"system_secondary_fixed_dim",       C(0xFFC0C6DC)},
+        {"system_tertiary_light",            C(0xFF725572)},
+        {"system_tertiary_dark",             C(0xFFE0BBDD)},
+        {"system_tertiary_container_light",  C(0xFFFDD7FA)},
+        {"system_tertiary_container_dark",   C(0xFF593D59)},
+        {"system_on_tertiary_light",         C(0xFFFFFFFF)},
+        {"system_on_tertiary_dark",          C(0xFF412742)},
+        {"system_on_tertiary_container_light", C(0xFF593D59)},
+        {"system_on_tertiary_container_dark",  C(0xFFFDD7FA)},
+        {"system_on_tertiary_fixed",         C(0xFF2A122C)},
+        {"system_on_tertiary_fixed_variant", C(0xFF593D59)},
+        {"system_tertiary_fixed",            C(0xFFFDD7FA)},
+        {"system_tertiary_fixed_dim",        C(0xFFE0BBDD)},
+        {"system_error_light",               C(0xFFBA1A1A)},
+        {"system_error_dark",                C(0xFFFFB4AB)},
+        {"system_error_container_light",     C(0xFFFFDAD6)},
+        {"system_error_container_dark",      C(0xFF93000A)},
+        {"system_on_error_light",            C(0xFFFFFFFF)},
+        {"system_on_error_dark",             C(0xFF690005)},
+        {"system_on_error_container_light",  C(0xFF93000A)},
+        {"system_on_error_container_dark",   C(0xFFFFDAD6)},
+        {"system_outline_light",             C(0xFF757780)},
+        {"system_outline_dark",              C(0xFF8F9099)},
+        {"system_outline_variant_light",     C(0xFFC5C6D0)},
+        {"system_outline_variant_dark",      C(0xFF44464F)},
+        {"system_outline_disabled",          C(0x1F1A1C1E)},
+        {"system_control_activated_light",   C(0xFFD9E2FF)},
+        {"system_control_activated_dark",    C(0xFF2F4578)},
+        {"system_control_normal_light",      C(0xFF44464F)},
+        {"system_control_normal_dark",       C(0xFFC5C6D0)},
+        {"system_control_highlight_light",   C(0xFF000000)},
+        {"system_control_highlight_dark",    C(0xFFFFFFFF)},
+        {"system_palette_key_color_primary_light",          C(0xFF6076AC)},
+        {"system_palette_key_color_primary_dark",           C(0xFF6076AC)},
+        {"system_palette_key_color_secondary_light",        C(0xFF70778B)},
+        {"system_palette_key_color_secondary_dark",         C(0xFF70778B)},
+        {"system_palette_key_color_tertiary_light",         C(0xFF8C6D8C)},
+        {"system_palette_key_color_tertiary_dark",          C(0xFF8C6D8C)},
+        {"system_palette_key_color_neutral_light",          C(0xFF76777D)},
+        {"system_palette_key_color_neutral_dark",           C(0xFF76777D)},
+        {"system_palette_key_color_neutral_variant_light",  C(0xFF757780)},
+        {"system_palette_key_color_neutral_variant_dark",   C(0xFF757780)},
+
+        // ── Text colors ──
+        {"system_text_hint_inverse_light",   C(0xFFE2E2E9)},
+        {"system_text_hint_inverse_dark",    C(0xFF1A1B20)},
+        {"system_text_primary_inverse_light", C(0xFFE2E2E9)},
+        {"system_text_primary_inverse_dark",  C(0xFF1A1B20)},
+        {"system_text_primary_inverse_disable_only_light", C(0xFFE2E2E9)},
+        {"system_text_primary_inverse_disable_only_dark",  C(0xFF1A1B20)},
+        {"system_text_secondary_and_tertiary_inverse_light", C(0xFFC5C6D0)},
+        {"system_text_secondary_and_tertiary_inverse_dark",  C(0xFF44464F)},
+        {"system_text_secondary_and_tertiary_inverse_disabled_light", C(0xFFE2E2E9)},
+        {"system_text_secondary_and_tertiary_inverse_disabled_dark",  C(0xFF1A1B20)},
+
+        // ── Legacy Holo colors ──
+        {"holo_blue_bright",  C(0xFF00DDFF)},
+        {"holo_blue_dark",    C(0xFF0099CC)},
+        {"holo_blue_light",   C(0xFF33B5E5)},
+        {"holo_green_dark",   C(0xFF669900)},
+        {"holo_green_light",  C(0xFF99CC00)},
+        {"holo_orange_dark",  C(0xFFFF8800)},
+        {"holo_orange_light", C(0xFFFFBB33)},
+        {"holo_purple",       C(0xFFAA66CC)},
+        {"holo_red_dark",     C(0xFFCC0000)},
+        {"holo_red_light",    C(0xFFFF4444)},
+        {"background_dark",   C(0xFF000000)},
+        {"background_light",  C(0xFFFFFFFF)},
+        {"black",             C(0xFF000000)},
+        {"darker_gray",       C(0xFFAAAAAA)},
+        {"tab_indicator_text", C(0xFF808080)},
+    };
+    return table;
+}
+
+bool RemoteContext::getDefaultSystemColor(const std::string& name, int& outColor) {
+    const auto& table = getDefaultColorTable();
+    auto it = table.find(name);
+    if (it != table.end()) {
+        outColor = it->second;
+        return true;
+    }
+    return false;
+}
+
+void RemoteContext::registerNamedColor(int id, const std::string& colorName) {
+    // Strip "color." prefix if present (names come in as "color.system_accent1_500")
+    std::string lookupName = colorName;
+    if (lookupName.size() > 6 && lookupName.substr(0, 6) == "color.") {
+        lookupName = lookupName.substr(6);
+    }
+
+    // The host's value (overrideColor) wins, then the document's own value; the built-in
+    // Material palette only fills a name the document left without a colour. Loaded, not
+    // overridden, so it neither blocks a later host value nor freezes the document's.
+    if (mColorOverrides.count(id) || mColors.count(id)) return;
+    int defaultColor;
+    if (getDefaultSystemColor(lookupName, defaultColor)) {
+        loadColor(id, defaultColor);
+    }
+}
+
+// ── Variable listener system ─────────────────────────────────────────
+
+void RemoteContext::listensTo(int variableId, Operation* op) {
+    if (!op) return;
+    auto& listeners = mVarListeners[variableId];
+    // Avoid duplicates
+    if (std::find(listeners.begin(), listeners.end(), op) == listeners.end()) {
+        listeners.push_back(op);
+    }
+}
+
+// The operations that read a variable only to draw: a change to what they read cannot change
+// what anything measures. Names, as Operation::name() spells them.
+static bool paintTimeConsumer(const std::string& n) {
+    if (n.rfind("DRAW_", 0) == 0 || n.rfind("MATRIX_", 0) == 0) return true;
+    static const std::unordered_set<std::string> names = {
+        "DrawContent", "DrawBitmapFontText", "CLIP_PATH", "CLIP_RECT", "PAINT_VALUES",
+        "PATH_DATA", "PathData", "PATH_CREATE", "PathAppend", "PATH_TWEEN", "PATH_COMBINE",
+        "PathExpression", "MODIFIER_OFFSET", "GraphicsLayerModifier",
+    };
+    return names.count(n) != 0;
+}
+
+void RemoteContext::classifyPaintOnlyVars() {
+    // Start from every listened-to variable and strike out any read by something that is not
+    // paint-time, until nothing changes. An expression passes its reader's verdict through:
+    // it is paint-only exactly when the variable it writes is.
+    std::unordered_set<int> paintOnly;
+    for (const auto& [id, listeners] : mVarListeners)
+        if (!listeners.empty()) paintOnly.insert(id);
+    for (bool changed = true; changed;) {
+        changed = false;
+        for (auto it = paintOnly.begin(); it != paintOnly.end();) {
+            bool ok = true;
+            for (Operation* op : mVarListeners[*it]) {
+                const std::string n = op->name();
+                if (paintTimeConsumer(n)) continue;
+                if (n == "ANIMATED_FLOAT") {
+                    auto* fe = dynamic_cast<FloatExpression*>(op);
+                    if (fe && fe->id != *it && paintOnly.count(fe->id)) continue;
+                }
+                ok = false;
+                break;
+            }
+            if (ok) { ++it; } else { it = paintOnly.erase(it); changed = true; }
+        }
+    }
+    mPaintOnlyVars = std::move(paintOnly);
+    mClassified = true;
+}
+
+void RemoteContext::notifyListeners(int variableId) {
+    auto it = mVarListeners.find(variableId);
+    if (it == mVarListeners.end()) return;
+    for (Operation* op : it->second) {
+        op->markDirty();
+    }
+}
+
+void RemoteContext::wakeIn(float seconds) {
+    // The reference's rule verbatim. mLastRepaint being NaN means nothing has consumed a
+    // delay yet, so the first request of a cycle wins outright; after that only a sooner
+    // request narrows the schedule, and a NaN clears it.
+    if (std::isnan(seconds) || std::isnan(mLastRepaint) || mRepaintSeconds > seconds) {
+        mRepaintSeconds = seconds;
+    }
+}
+
+int RemoteContext::getRepaintDelay(int64_t currentTimeMillis) {
+    // Mirrors RemoteComposeState.getOpsToUpdate. Only ID_CONTINUOUS_SEC forces a repaint
+    // every frame — ID_ANIMATION_TIME and ID_ANIMATION_DELTA_TIME used to be in this
+    // test, which spun a document at full frame rate merely for reading animation time.
+    // The TypeScript player dropped them for the same reason.
+    if (hasListeners(ID_CONTINUOUS_SEC)) {
+        return 1;
+    }
+
+    int repaintMs = std::numeric_limits<int>::max();
+    if (!std::isnan(mRepaintSeconds)) {
+        repaintMs = static_cast<int>(mRepaintSeconds * 1000);
+        mLastRepaint = mRepaintSeconds;
+    }
+
+    // Wake just past the next boundary rather than a flat interval, so a clock ticks on
+    // the second instead of at whatever phase the first frame happened to land on.
+    if (hasListeners(ID_TIME_IN_SEC)) {
+        int sub = static_cast<int>(currentTimeMillis % 1000);
+        return std::min(repaintMs, 2 + 1000 - sub);
+    }
+    if (hasListeners(ID_TIME_IN_MIN)) {
+        int sub = static_cast<int>(currentTimeMillis % 60000);
+        return std::min(repaintMs, 2 + 60000 - sub);
+    }
+    if (!std::isnan(mRepaintSeconds)) {
+        return static_cast<int>(mRepaintSeconds * 1000);
+    }
+    return -1; // Static content, no repaint needed
+}
+
+} // namespace rccore

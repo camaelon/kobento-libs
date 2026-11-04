@@ -1,0 +1,15 @@
+// Non-macOS fallback: no embedded web views. (A future port could use a platform
+// WebView2 / GTK WebKit here.)
+
+#include "rcplayer/WebCustomHost.h"
+
+#include "include/core/SkImage.h"
+
+void WebCustomHost::setWindow(GLFWwindow*) {}
+void WebCustomHost::beginFrame() {}
+void WebCustomHost::endFrame() {}
+void WebCustomHost::reset() {}
+bool WebCustomHost::drawCustom(int, const std::string&, rccore::PaintContext*,
+                               float, float, double) { return false; }
+sk_sp<SkImage> WebCustomHost::pageSnapshot(const std::string&) { return nullptr; }
+uint64_t WebCustomHost::pagesPictured() { return 0; }
