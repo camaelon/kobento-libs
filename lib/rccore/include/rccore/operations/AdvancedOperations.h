@@ -1467,14 +1467,12 @@ public:
 
     void apply(RemoteContext& context) override {
         if (context.getMode() != ContextMode::PAINT) return;
-        // Only initialize particles once (first paint pass).
-        // The Java player uses an Impulse wrapper for this; the C++ player
-        // doesn't implement Impulse, so we guard with a flag instead.
-        if (!mInitialized) {
-            for (int i = 0; i < mParticleCount; i++) {
-                initializeParticle(i);
-            }
-            mInitialized = true;
+        // Every paint initialises the particles again, as the reference does
+        // (ParticlesCreate.paint). A system that persists is created in an impulse,
+        // which applies it once when its window opens, and moved in the impulse's
+        // ImpulseProcess; as a plain command it restarts every frame.
+        for (int i = 0; i < mParticleCount; i++) {
+            initializeParticle(i);
         }
     }
 
@@ -1553,7 +1551,6 @@ private:
     SimpleEval mExp;
     int mId = 0;
     int mParticleCount = 0;
-    bool mInitialized = false;
     std::vector<int> mVarId;
     std::vector<std::vector<float>> mEquations;    // original equations
     std::vector<std::vector<float>> mOutEquations;  // with variables resolved

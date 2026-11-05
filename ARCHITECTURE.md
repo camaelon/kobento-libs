@@ -109,7 +109,11 @@ static evaluator with its RPN stack was a crash waiting for that.
 `ParticlesCreate` allocates a per-particle state vector and seeds initial
 values via embedded RPN expressions. `ParticlesLoop` runs an expression
 batch over each particle every frame (advancing position, lifetime, color
-…). `ParticlesCompare` filters particles based on an RPN predicate. The
+…). `ParticlesCompare` filters particles based on an RPN predicate.
+Like the reference (`ParticlesCreate.paint`), `ParticlesCreate` seeds the
+particles again every time it paints: a system that persists is created in
+an `ImpulseOperation`, which applies it once when its window opens, and
+moved in its `ImpulseProcess`, which runs every frame after. The
 container ops use the same expression evaluator and variable map as the
 rest of the engine.
 
