@@ -1,5 +1,9 @@
 # kobento-libs
 
+> Part of [Kobento](https://mcp.kobento.dev/), an independent implementation of RemoteCompose, not affiliated
+> with Google. [How the repositories fit together](https://mcp.kobento.dev/about/) ·
+> [Status and known gaps](https://mcp.kobento.dev/status/)
+
 The Kobento C++ libraries: the RemoteCompose engine (`rcX`) for a compact binary UI / canvas format.
 
 `rcX` reads a binary document — a stream of opcodes describing layout,
