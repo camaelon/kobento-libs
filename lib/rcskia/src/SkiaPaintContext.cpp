@@ -1931,6 +1931,10 @@ rccore::d3::SoftwarePaint3DContext* SkiaPaintContext::Skia3D::ensure() {
         h = sz.height();
     }
     if (w <= 0 || h <= 0) return nullptr;
+    // Supersampled: the buffer is k times the document's size, drawn back at 1/k (blit).
+    w *= mSuper;
+    h *= mSuper;
+    mCtx.setSupersample(mSuper);
     if (!mSized || mCtx.width() != w || mCtx.height() != h) {
         mCtx.setSize(w, h);
         // setSize does not clear; the depth buffer must start far or the first mesh is
@@ -1951,7 +1955,13 @@ void SkiaPaintContext::Skia3D::blit() {
     SkPixmap pm(info, px.data(), static_cast<size_t>(w) * 4);
     SkBitmap bm;
     if (!bm.installPixels(pm)) return;
-    mOwner.mCanvas->drawImage(bm.asImage(), 0, 0);
+    if (mSuper == 1) {
+        mOwner.mCanvas->drawImage(bm.asImage(), 0, 0);
+        return;
+    }
+    const float k = (float) mSuper;
+    mOwner.mCanvas->drawImageRect(bm.asImage(), SkRect::MakeWH(w / k, h / k),
+                                  SkSamplingOptions(SkFilterMode::kLinear, SkMipmapMode::kNone));
 }
 
 void SkiaPaintContext::Skia3D::defineMesh3D(int id, const std::vector<int32_t>& indices,
@@ -2039,7 +2049,12 @@ void SkiaPaintContext::Skia3D::drawMesh3DCanvas(int meshId, bool smooth) {
 
     auto verts = SkVertices::MakeCopy(SkVertices::kTriangles_VertexMode, n, pos.data(),
                                       texs.empty() ? nullptr : texs.data(), colors);
-    if (verts) mOwner.mCanvas->drawVertices(verts, blend, paint);
+    if (!verts) return;
+    // The triangles are in the (supersampled) buffer's pixels: back to the document's.
+    mOwner.mCanvas->save();
+    mOwner.mCanvas->scale(1.f / (float) mSuper, 1.f / (float) mSuper);
+    mOwner.mCanvas->drawVertices(verts, blend, paint);
+    mOwner.mCanvas->restore();
 }
 
 void SkiaPaintContext::Skia3D::setTexture3D(int bitmapId) {

@@ -30,6 +30,13 @@ public:
 
     void setBaseColorArgb(int32_t argb) { mBaseColorArgb = argb; }
 
+    /**
+     * The buffer is this many times the document's size per axis (the host sizes it so and
+     * draws it back scaled down: supersampling, or the screen's scale). Wireframe lines are
+     * drawn k x k times so they keep their one-document-pixel weight. 1 by default.
+     */
+    void setSupersample(int k) { mSuper = k < 1 ? 1 : k; }
+
     void defineMesh3D(int id, const std::vector<int32_t>& indices,
                       const std::vector<float>& verts, const std::vector<float>& normals,
                       const std::vector<float>& uv = {});
@@ -103,6 +110,7 @@ private:
     std::vector<float> mZbuf;
     int mWidth = 0, mHeight = 0;
     int32_t mBaseColorArgb = (int32_t) 0xFFFFFFFF;
+    int mSuper = 1;
 
     std::vector<Light> mLights;
     bool mLightsTouched = false;

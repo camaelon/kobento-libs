@@ -46,6 +46,14 @@ public:
 
     // Update the canvas pointer (e.g. after surface resize)
     void setCanvas(SkCanvas* canvas) { mCanvas = canvas; }
+
+    /**
+     * Software 3D at k times the document's resolution per axis, drawn back scaled down with
+     * smoothing. A host that scales the canvas up (a phone at 3x, drawing a dp document) sets
+     * its scale so the 3D is as sharp as the 2D around it; 2 on a 1x canvas antialiases it.
+     * Costs about k^2 the 3D time. 1 by default.
+     */
+    void setSupersample3D(int k) { m3D.setSupersample(k); }
     float currentPaintAlpha() const override { return mPaint.getAlphaf(); }
     SkCanvas* canvas() const { return mCanvas; }   // for custom-component hosts
 
@@ -166,6 +174,7 @@ private:
         void setTexture3D(int bitmapId) override;
         void setMaterial3D(float specStrength, float shininess) override;
         void setDepthBias3D(float constant, float slope) override;
+        void setSupersample(int k) { mSuper = k < 1 ? 1 : k; }
 
     private:
         /** Size the software buffer to the canvas. Null if the canvas has no area yet. */
@@ -178,6 +187,7 @@ private:
         SkiaPaintContext& mOwner;
         rccore::d3::SoftwarePaint3DContext mCtx;
         bool mSized = false;
+        int mSuper = 1;
         /** Reused across frames so a per-frame rebuild does not reallocate. */
         rccore::d3::SoftwarePaint3DContext::CanvasMesh mCanvasMesh;
         /** The active texture as an image, for the canvas path's shader. */

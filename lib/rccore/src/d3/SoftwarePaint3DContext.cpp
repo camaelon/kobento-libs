@@ -411,12 +411,18 @@ void SoftwarePaint3DContext::drawMeshWireframe(const Mesh& m, int32_t lineColor,
         float ax = mTriScreen[0], ay = mTriScreen[1], az = mTriScreen[2];
         float bx = mTriScreen[3], by = mTriScreen[4], bz = mTriScreen[5];
         float cx = mTriScreen[6], cy = mTriScreen[7], cz = mTriScreen[8];
-        if (e0) drawLineDepthTested(mZbuf.data(), mColor.data(), lineColor, w, h,
-                                    ax, ay, az, bx, by, bz, WIRE_DEPTH_BIAS);
-        if (e1) drawLineDepthTested(mZbuf.data(), mColor.data(), lineColor, w, h,
-                                    bx, by, bz, cx, cy, cz, WIRE_DEPTH_BIAS);
-        if (e2) drawLineDepthTested(mZbuf.data(), mColor.data(), lineColor, w, h,
-                                    cx, cy, cz, ax, ay, az, WIRE_DEPTH_BIAS);
+        // A supersampled buffer draws each line k x k times, a pixel apart, so it keeps its
+        // weight once the buffer is scaled down (the TypeScript player does the same).
+        for (int oy = 0; oy < mSuper; oy++) {
+            for (int ox = 0; ox < mSuper; ox++) {
+                if (e0) drawLineDepthTested(mZbuf.data(), mColor.data(), lineColor, w, h,
+                                            ax + ox, ay + oy, az, bx + ox, by + oy, bz, WIRE_DEPTH_BIAS);
+                if (e1) drawLineDepthTested(mZbuf.data(), mColor.data(), lineColor, w, h,
+                                            bx + ox, by + oy, bz, cx + ox, cy + oy, cz, WIRE_DEPTH_BIAS);
+                if (e2) drawLineDepthTested(mZbuf.data(), mColor.data(), lineColor, w, h,
+                                            cx + ox, cy + oy, cz, ax + ox, ay + oy, az, WIRE_DEPTH_BIAS);
+            }
+        }
     }
 }
 
