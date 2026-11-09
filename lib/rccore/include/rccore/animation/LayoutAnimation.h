@@ -140,6 +140,20 @@ inline bool animUpdate(LayoutAnimStore& store, int cid, ComponentMeasure& target
     // could not finish — a component that became GONE stayed on screen for good, which is
     // what made filter chips look dead while the list never filtered. (Entering escaped
     // this: it holds st.to, which does compare equal.)
+    // Hidden before and hidden now: nothing to draw, so nothing to animate. A column gives a
+    // GONE child the slot it would occupy, so its bounds move whenever its siblings switch;
+    // tweening that move (the branch below forces VISIBLE) drew a never-shown component
+    // sliding across the screen, and left it recorded as VISIBLE, so its real appearance
+    // later slid in from a stale slot instead of fading in place. AnimateMeasure.paint
+    // draws nothing for GONE -> GONE. An exit fade in flight is not caught here: its
+    // st.live is the held, VISIBLE frame.
+    if (!target.isVisible() && !st.live.isVisible()) {
+        st.animating = false;
+        st.live = target;
+        target.alpha = 0.0f;
+        return false;
+    }
+
     const ComponentMeasure& destination = st.animating ? st.to : st.live;
     if (!target.sameBounds(destination)) {
         // A destination that moves again within a moment of the last move is being driven —
@@ -198,8 +212,9 @@ inline bool animUpdate(LayoutAnimStore& store, int cid, ComponentMeasure& target
         cur.y = animLerp(st.from.y, st.to.y, p);
         cur.w = animLerp(st.from.w, st.to.w, p);
         cur.h = animLerp(st.from.h, st.to.h, p);
-        cur.visibility = VIS_VISIBLE;
-        cur.alpha = 1.0f;
+        // A move keeps the visibility it is moving to: only an enter or an exit changes it.
+        cur.visibility = st.to.visibility;
+        cur.alpha = st.to.isVisible() ? 1.0f : 0.0f;
     }
     cur.id = target.id;
 

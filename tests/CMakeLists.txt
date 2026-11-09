@@ -40,3 +40,8 @@ add_executable(text_from_float_test text_from_float_test.cpp)
 target_link_libraries(text_from_float_test PRIVATE rccore)
 add_test(NAME text_from_float
          COMMAND text_from_float_test "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/text_from_float_java.tsv")
+
+# Layout animation: a GONE component whose slot moves is not drawn, and later fades in place.
+add_executable(layout_anim_test layout_anim_test.cpp)
+target_link_libraries(layout_anim_test PRIVATE rccore)
+add_test(NAME layout_anim COMMAND layout_anim_test)
