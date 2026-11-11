@@ -640,6 +640,14 @@ static int utf8ByteToUtf16Index(const std::string& s, int byteOff) {
     return units;
 }
 
+// Width a line may exceed its box by and still not wrap. A text is often measured, then
+// measured again with its own width as the bound -- after a parent added and removed its
+// padding, `(w + p) - p`, which in float need not give back w. Without slack a width that
+// came back a hair smaller wrapped the text inside a box one line tall, and every word after
+// the first vanished (a weighted "Emit .rc" drew as "Emit"). Rounding is ~1e-5; this is far
+// below anything visible.
+static constexpr float kWrapSlack = 0.01f;
+
 static std::vector<TextLine> wrapText(PaintContext* pc, const std::string& text,
                                        float fontSize, float maxWidth) {
     std::vector<TextLine> lines;
@@ -648,7 +656,7 @@ static std::vector<TextLine> wrapText(PaintContext* pc, const std::string& text,
 
     // Quick check: fits in one line?
     float fullW = pc ? pc->measureTextWidth(text, fontSize) : fontSize * 0.6f * n;
-    if (fullW <= maxWidth) { lines.push_back({0, n}); return lines; }
+    if (fullW <= maxWidth + kWrapSlack) { lines.push_back({0, n}); return lines; }
 
     int lineStart = 0;
     int lastWordEnd = 0;
@@ -669,7 +677,7 @@ static std::vector<TextLine> wrapText(PaintContext* pc, const std::string& text,
                          : fontSize * 0.6f * (wordEnd - wordStart);
         float spaceW = (lineWidth > 0) ? (pc ? pc->measureTextWidth(" ", fontSize) : fontSize * 0.3f) : 0;
 
-        if (lineWidth + spaceW + wordW > maxWidth && lineWidth > 0) {
+        if (lineWidth + spaceW + wordW > maxWidth + kWrapSlack && lineWidth > 0) {
             // Wrap: emit current line
             lines.push_back({lineStart, lastWordEnd});
             lineStart = wordStart;
@@ -963,7 +971,7 @@ static void measureText(Operation* op, PaintContext* pc, RemoteContext& ctx,
     // allowed (TextLayout: `textWidth > maxWidth && mMaxLines > 1 && maxWidth > 0`),
     // or when a newline forces it. Wrapping regardless of maxLines made every
     // `maxLines: 1` text twice as tall as it is on the device.
-    if (contentMaxW > 0 && ((textW > contentMaxW && maxLines > 1) || hasNewlines)) {
+    if (contentMaxW > 0 && ((textW > contentMaxW + kWrapSlack && maxLines > 1) || hasNewlines)) {
         auto wrappedLines = wrapText(pc, text, fsize,
                                      contentMaxW > 0 ? contentMaxW : 1e9f);
         if ((int) wrappedLines.size() > maxLines) {
@@ -3080,7 +3088,7 @@ static void paintTextLines(PaintContext* pc, int tid, const std::string& text, f
     const bool ellipsis = overflow == 3 || overflow == 4 || overflow == 5;
     const bool hasNewlines = text.find('\n') != std::string::npos;
     std::vector<TextLine> lines;
-    if (contentW > 0 && ((fullW > contentW && maxLines > 1) || hasNewlines)) {
+    if (contentW > 0 && ((fullW > contentW + kWrapSlack && maxLines > 1) || hasNewlines)) {
         lines = wrapText(pc, text, fsize, contentW);
     } else {
         lines.push_back({0, (int) text.size()});
