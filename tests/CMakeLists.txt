@@ -45,3 +45,9 @@ add_test(NAME text_from_float
 add_executable(layout_anim_test layout_anim_test.cpp)
 target_link_libraries(layout_anim_test PRIVATE rccore)
 add_test(NAME layout_anim COMMAND layout_anim_test)
+
+# A text laid out at its own measured width must not wrap (float slack in the wrap checks).
+add_executable(text_wrap_test text_wrap_test.cpp)
+target_link_libraries(text_wrap_test PRIVATE rcskia rccore skia_lib)
+add_test(NAME text_wrap
+         COMMAND text_wrap_test "${CMAKE_CURRENT_SOURCE_DIR}/fixtures")

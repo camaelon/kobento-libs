@@ -1,0 +1,6 @@
+{"header":{"apiLevel":7,"width":300,"height":200,"profiles":513},
+ "root":[{"column":{"modifiers":["fillMaxSize",{"background":"#FF0B1120"},{"padding":[10,10]},{"spacedBy":8}],"children":[
+  {"box":{"modifiers":[{"clip":10},{"background":"#FF1E293B"},{"padding":[16,10]}],"children":[{"text":{"value":"Emit .rc","fontSize":15,"fontWeight":500,"color":"#FFE2E8F0"}}]}},
+  {"box":{"modifiers":[{"background":"#FF1E293B"},{"padding":[16,10]}],"children":[{"text":{"value":"Emit .rc","fontSize":15,"fontWeight":500,"color":"#FFE2E8F0"}}]}},
+  {"box":{"modifiers":[{"background":"#FF1E293B"},{"padding":[16,10]}],"children":[{"text":{"value":"Emit .rc","fontSize":15,"color":"#FFE2E8F0"}}]}},
+  {"box":{"modifiers":[{"background":"#FF1E293B"},{"padding":[16,10]}],"children":[{"text":{"value":"Emit rc","fontSize":15,"fontWeight":500,"color":"#FFE2E8F0"}}]}}]}}]}
