@@ -66,6 +66,11 @@ bool CoreDocument::initFromBuffer(WireBuffer& buffer) {
             auto db = header->headerMap.find(27);
             if (db != header->headerMap.end() && std::holds_alternative<int32_t>(db->second))
                 mDensityBehavior = std::get<int32_t>(db->second);
+            // Header.FEATURE_OPTIMIZATION_LEVEL: absent (or -1) means all.
+            auto ol = header->headerMap.find(28);
+            if (ol != header->headerMap.end() && std::holds_alternative<int32_t>(ol->second)
+                && std::get<int32_t>(ol->second) != -1)
+                mOptimizationLevel = std::get<int32_t>(ol->second);
         }
     }
     return true;

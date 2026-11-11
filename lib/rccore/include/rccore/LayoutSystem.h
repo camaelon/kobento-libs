@@ -59,6 +59,23 @@ struct ComponentMeasure {
     // BEFORE: Component.isHoldingLayoutForBeforeAnimation).
     bool holdExit = false;
 
+    // The measure cache (Java ComponentMeasure.setCachedConstraints / hasCachedConstraints):
+    // the constraints of the last measure in pass `cachePass`. A measure asking again in the
+    // same pass with the same constraints, or with this measured size as the fixed size on
+    // one axis, can keep the result.
+    uint64_t cachePass = 0;
+    float cMinW = -1, cMaxW = -1, cMinH = -1, cMaxH = -1;
+    void setCachedConstraints(uint64_t pass, float minW, float maxW, float minH, float maxH) {
+        cachePass = pass; cMinW = minW; cMaxW = maxW; cMinH = minH; cMaxH = maxH;
+    }
+    bool hasCachedConstraints(uint64_t pass, float minW, float maxW, float minH, float maxH) const {
+        if (cachePass != pass) return false;
+        if (cMinW == minW && cMaxW == maxW && cMinH == minH && cMaxH == maxH) return true;   // exact
+        if (cMinW == minW && cMaxW == maxW && minH == h && maxH == h) return true;           // vertical positioning pass
+        if (cMinH == minH && cMaxH == maxH && minW == w && maxW == w) return true;           // horizontal positioning pass
+        return false;
+    }
+
     bool isGone() const { return visibility == VIS_GONE; }
     bool isVisible() const { return visibility == VIS_VISIBLE; }
 
@@ -185,6 +202,11 @@ struct LayoutState {
 
     // All data/expression operations (to run in DATA mode)
     std::vector<Operation*> dataOps;
+    // The data operations at the component's own level (not in its content, not in a
+    // modifier): Java's ComponentData in the component's list, which hasDynamicComputes reads.
+    std::vector<Operation*> componentDataOps;
+    // Measure-cache memos for this pass (the states are rebuilt every pass): -1 unknown.
+    int dynamicMemo = -1, childComputedMemo = -1;
 
     // LayoutCompute modifiers (expression-driven custom measure/position)
     std::vector<LayoutComputeInfo> measureComputes;   // TYPE_MEASURE (0)

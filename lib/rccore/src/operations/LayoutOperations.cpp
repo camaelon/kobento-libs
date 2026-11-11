@@ -527,6 +527,7 @@ static void inflateLayout(Operation* self, LayoutState& ls) {
         } else {
             // Data operations (TextData, constants, expressions, etc.)
             ls.dataOps.push_back(child);
+            ls.componentDataOps.push_back(child);
         }
     }
 }
@@ -727,6 +728,9 @@ static float computeModifierDefinedHeight(const LayoutState& ls, const RemoteCon
 static void measureComponent(Operation* op, PaintContext* pc, RemoteContext& ctx,
                              float minW, float maxW, float minH, float maxH,
                              MeasurePass& measure);
+static void measureComponentUncached(Operation* op, PaintContext* pc, RemoteContext& ctx,
+                                     float minW, float maxW, float minH, float maxH,
+                                     MeasurePass& measure);
 
 static void layoutComponent(Operation* op, RemoteContext& ctx, MeasurePass& measure);
 
@@ -1579,7 +1583,9 @@ static void measureLayoutManager(Operation* op, PaintContext* pc, RemoteContext&
                         child->name().c_str(), getComponentId(child), iw, ih);
                     need += nb;
                     if (iw <= childMaxW + 0.5f && ih <= childMaxH + 0.5f) {
-                        measureComponent(child, pc, ctx, iw, childMaxW, ih, childMaxH, measure);
+                        // (Uncached: the fitBox set this child GONE or visible since any earlier
+                        // measure of it in the pass, which a cached result would not reflect.)
+                        measureComponentUncached(child, pc, ctx, iw, childMaxW, ih, childMaxH, measure);
                         auto& cm2 = measure.get(getComponentId(child));
                         if (!cm2.isGone() && cm2.w <= childMaxW + 0.5f
                             && cm2.h <= childMaxH + 0.5f) {
@@ -2427,9 +2433,71 @@ static void layoutStateLayout(Operation* op, RemoteContext& ctx, MeasurePass& me
 }
 
 // ── Generic measure dispatcher ───────────────────────────────────────
+// ── The measure cache (Java LayoutManager.measure, CoreDocument OPTIMIZATION_MEASURE_CACHE and
+// OPTIMIZATION_CONSTRAINTS_CACHE) ──────────────────────────────────
+// A pass id: a component asked again in the same pass with the constraints it was measured with
+// keeps its result. Without it a flow measures each child four times per pass and nested flows
+// multiply (a dashboard of lists: 100,000 measures per layout).
+static uint64_t gMeasurePassId = 0;
+static bool gMeasureCacheLive = false;   // only inside the layout pass below
+
+// Java Component.hasDynamicComputes: anything in the component's own list reading variables —
+// a component-level data operation that is VariableSupport, or a direct child that is (a text,
+// an image, a custom component). Such a component is measured every time.
+static bool hasDynamicComputes(Operation* op, RemoteContext& ctx) {
+    auto& ls = getLS(ctx, op);
+    if (ls.dynamicMemo >= 0) return ls.dynamicMemo == 1;
+    bool dyn = false;
+    for (auto* d : ls.componentDataOps) if (d->isVariableSupport()) { dyn = true; break; }
+    // A fitBox picks one child per measure, setting the others GONE: measured every time.
+    if (op->opcode() == 176) dyn = true;
+    if (!dyn) for (auto* c : ls.layoutChildren) {
+        int oc = c->opcode();
+        if (oc == 208 || oc == 239 || oc == 234 || oc == 93) { dyn = true; break; }
+    }
+    ls.dynamicMemo = dyn ? 1 : 0;
+    return dyn;
+}
+
+// Java Component.hasChildWithComputedLayout: any descendant with a LayoutCompute modifier.
+static bool hasChildWithComputedLayout(Operation* op, RemoteContext& ctx) {
+    auto& ls = getLS(ctx, op);
+    if (ls.childComputedMemo >= 0) return ls.childComputedMemo == 1;
+    bool found = false;
+    for (auto* c : ls.layoutChildren) {
+        auto& cls = getLS(ctx, c);
+        inflateLayout(c, cls);
+        if (!cls.measureComputes.empty() || !cls.positionComputes.empty()
+            || hasChildWithComputedLayout(c, ctx)) { found = true; break; }
+    }
+    getLS(ctx, op).childComputedMemo = found ? 1 : 0;
+    return found;
+}
+
+static void measureComponentUncached(Operation* op, PaintContext* pc, RemoteContext& ctx,
+                                     float minW, float maxW, float minH, float maxH,
+                                     MeasurePass& measure);
+
 static void measureComponent(Operation* op, PaintContext* pc, RemoteContext& ctx,
                              float minW, float maxW, float minH, float maxH,
                              MeasurePass& measure) {
+    int cid = getComponentId(op);
+    CoreDocument* doc = ctx.getDocument();
+    bool cache = cid != -1 && gMeasureCacheLive && doc
+                 && doc->isMeasureCacheEnabled() && doc->isConstraintsCacheEnabled();
+    if (cache) {
+        auto& ls = getLS(ctx, op);
+        inflateLayout(op, ls);
+        cache = !hasDynamicComputes(op, ctx) && !hasChildWithComputedLayout(op, ctx);
+    }
+    if (cache && measure.get(cid).hasCachedConstraints(gMeasurePassId, minW, maxW, minH, maxH)) return;
+    measureComponentUncached(op, pc, ctx, minW, maxW, minH, maxH, measure);
+    if (cache) measure.get(cid).setCachedConstraints(gMeasurePassId, minW, maxW, minH, maxH);
+}
+
+static void measureComponentUncached(Operation* op, PaintContext* pc, RemoteContext& ctx,
+                                     float minW, float maxW, float minH, float maxH,
+                                     MeasurePass& measure) {
     int oc = op->opcode();
     if (oc == 208 || oc == 239) {
         measureText(op, pc, ctx, minW, maxW, minH, maxH, measure);
@@ -3798,6 +3866,8 @@ void LayoutRoot::apply(RemoteContext& context) {
         // Full measure/layout, exactly as the un-cached path did (fresh per-op state so
         // inflateLayout — gated on ls.inflated — re-reads every modifier this pass).
         cache.states.clear();
+        gMeasurePassId++;   // a new pass for the measure cache
+        gMeasureCacheLive = true;
         sSawStateLayout = false;
         sSawActiveAnim = false;
         resetLayoutOverflowCounts();
@@ -3833,6 +3903,8 @@ void LayoutRoot::apply(RemoteContext& context) {
             storeMeasuredDimensions(layoutChild, context, measure);
             gCountLayoutOverflow = false;
         }
+
+        gMeasureCacheLive = false;
 
         // Layout-animation pass: blend measured bounds toward targets over time.
         double animTime = context.getAnimationTime();

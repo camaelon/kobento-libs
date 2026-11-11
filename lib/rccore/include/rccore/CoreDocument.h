@@ -64,6 +64,19 @@ public:
     int getHeight() const { return mHeight; }
     /** DOC_DENSITY_BEHAVIOR (header key 27): 0 legacy, 1 pixels, 2 dp. */
     int getDensityBehavior() const { return mDensityBehavior; }
+
+    // Layout optimizations (Java CoreDocument.OPTIMIZATION_*): a bit mask, all on by default;
+    // the header's FEATURE_OPTIMIZATION_LEVEL (28) can narrow it.
+    static constexpr int OPTIMIZATION_NONE = 0;
+    static constexpr int OPTIMIZATION_MEASURE_CACHE = 1;
+    static constexpr int OPTIMIZATION_LAYOUT_BOUNDARIES = 2;
+    static constexpr int OPTIMIZATION_FLAT_MEASURE_PASS = 4;
+    static constexpr int OPTIMIZATION_CONSTRAINTS_CACHE = 8;
+    static constexpr int OPTIMIZATION_ALL = 1 | 2 | 4 | 8;
+    void setOptimizationLevel(int mask) { mOptimizationLevel = mask; }
+    int getOptimizationLevel() const { return mOptimizationLevel; }
+    bool isMeasureCacheEnabled() const { return (mOptimizationLevel & OPTIMIZATION_MEASURE_CACHE) != 0; }
+    bool isConstraintsCacheEnabled() const { return (mOptimizationLevel & OPTIMIZATION_CONSTRAINTS_CACHE) != 0; }
     void setWidth(int w) { mWidth = w; }
     void setHeight(int h) { mHeight = h; }
     const std::vector<std::unique_ptr<Operation>>& getOperations() const { return mOperations; }
@@ -116,6 +129,7 @@ private:
     std::vector<Operation*> mTouchTargets;
     int mCurrentId = 0;
     int mDensityBehavior = 0;
+    int mOptimizationLevel = OPTIMIZATION_ALL;
     LayoutAnimStore mAnimStore;
     int mWidth = 600;
     int mHeight = 600;
